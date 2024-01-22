@@ -28,6 +28,10 @@ class ModelSettings(BaseSettings):
         ge=-1,
         description="The number of layers to put on the GPU. The rest will be on the CPU. Set -1 to move all to GPU.",
     )
+    split_mode: int = Field(
+        default=llama_cpp.LLAMA_SPLIT_LAYER,
+        description="The split mode to use.",
+    )
     main_gpu: int = Field(
         default=0,
         ge=0,
@@ -48,11 +52,15 @@ class ModelSettings(BaseSettings):
         default=llama_cpp.llama_mlock_supported(),
         description="Use mlock.",
     )
+    kv_overrides: Optional[List[str]] = Field(
+        default=None,
+        description="List of model kv overrides in the format key=type:value where type is one of (bool, int, float). Valid true values are (true, TRUE, 1), otherwise false.",
+    )
     # Context Params
     seed: int = Field(
         default=llama_cpp.LLAMA_DEFAULT_SEED, description="Random seed. -1 for random."
     )
-    n_ctx: int = Field(default=2048, ge=1, description="The context size.")
+    n_ctx: int = Field(default=2048, ge=0, description="The context size.")
     n_batch: int = Field(
         default=512, ge=1, description="The batch size to use per eval."
     )
@@ -82,7 +90,7 @@ class ModelSettings(BaseSettings):
     logits_all: bool = Field(default=True, description="Whether to return logits.")
     embedding: bool = Field(default=True, description="Whether to use embeddings.")
     offload_kqv: bool = Field(
-        default=False, description="Whether to offload kqv to the GPU."
+        default=True, description="Whether to offload kqv to the GPU."
     )
     # Sampling Params
     last_n_tokens_size: int = Field(
@@ -125,6 +133,15 @@ class ModelSettings(BaseSettings):
     cache_size: int = Field(
         default=2 << 30,
         description="The size of the cache in bytes. Only used if cache is True.",
+    )
+    # Tokenizer Options
+    hf_tokenizer_config_path: Optional[str] = Field(
+        default=None,
+        description="The path to a HuggingFace tokenizer_config.json file.",
+    )
+    hf_pretrained_model_name_or_path: Optional[str] = Field(
+        default=None,
+        description="The model name or path to a pretrained HuggingFace tokenizer model. Same as you would pass to AutoTokenizer.from_pretrained().",
     )
     # Misc
     verbose: bool = Field(

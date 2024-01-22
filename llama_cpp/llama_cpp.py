@@ -91,6 +91,12 @@ c_float_p = POINTER(c_float)
 c_uint8_p = POINTER(c_uint8)
 c_size_t_p = POINTER(c_size_t)
 
+# from ggml-backend.h
+# typedef bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data);
+ggml_backend_sched_eval_callback = ctypes.CFUNCTYPE(
+    c_bool, c_void_p, c_bool, c_void_p
+)
+
 # llama.h bindings
 
 _lib.llama_max_devices.argtypes = []
@@ -112,8 +118,8 @@ LLAMA_FILE_MAGIC_GGSN = 0x6767736E
 
 # define LLAMA_SESSION_MAGIC   LLAMA_FILE_MAGIC_GGSN
 LLAMA_SESSION_MAGIC = LLAMA_FILE_MAGIC_GGSN
-# define LLAMA_SESSION_VERSION 3
-LLAMA_SESSION_VERSION = 3
+# define LLAMA_SESSION_VERSION 4
+LLAMA_SESSION_VERSION = 4
 
 
 # struct llama_model;
@@ -180,6 +186,8 @@ LLAMA_TOKEN_TYPE_BYTE = 6
 #     LLAMA_FTYPE_MOSTLY_Q5_K_M        = 17, // except 1d tensors
 #     LLAMA_FTYPE_MOSTLY_Q6_K          = 18, // except 1d tensors
 #     LLAMA_FTYPE_MOSTLY_IQ2_XXS       = 19, // except 1d tensors
+#     LLAMA_FTYPE_MOSTLY_IQ2_XS        = 20, // except 1d tensors
+#     LLAMA_FTYPE_MOSTLY_Q2_K_S        = 21, // except 1d tensors
 
 #     LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
 # };
@@ -200,6 +208,9 @@ LLAMA_FTYPE_MOSTLY_Q4_K_M = 15
 LLAMA_FTYPE_MOSTLY_Q5_K_S = 16
 LLAMA_FTYPE_MOSTLY_Q5_K_M = 17
 LLAMA_FTYPE_MOSTLY_Q6_K = 18
+LLAMA_FTYPE_MOSTLY_IQ2_XXS = 19
+LLAMA_FTYPE_MOSTLY_IQ2_XS = 20
+LLAMA_FTYPE_MOSTLY_Q2_K_S = 21
 LLAMA_FTYPE_GUESSED = 1024
 
 # enum llama_rope_scaling_type {
@@ -214,6 +225,15 @@ LLAMA_ROPE_SCALING_NONE = 0
 LLAMA_ROPE_SCALING_LINEAR = 1
 LLAMA_ROPE_SCALING_YARN = 2
 LLAMA_ROPE_SCALING_MAX_VALUE = LLAMA_ROPE_SCALING_YARN
+
+# enum llama_split_mode {
+#     LLAMA_SPLIT_NONE    = 0, // single GPU
+#     LLAMA_SPLIT_LAYER   = 1, // split layers and KV across GPUs
+#     LLAMA_SPLIT_ROW     = 2, // split rows across GPUs
+# };
+LLAMA_SPLIT_NONE = 0
+LLAMA_SPLIT_LAYER = 1
+LLAMA_SPLIT_ROW = 2
 
 
 # typedef struct llama_token_data {
@@ -360,13 +380,22 @@ class llama_model_kv_override(Structure):
 
 # struct llama_model_params {
 #     int32_t n_gpu_layers; // number of layers to store in VRAM
-#     int32_t main_gpu;     // the GPU that is used for scratch and small tensors
-#     const float * tensor_split; // how to split layers across multiple GPUs (size: LLAMA_MAX_DEVICES)
+#     enum llama_split_mode split_mode; // how to split the model across multiple GPUs
+
+#     // main_gpu interpretation depends on split_mode:
+#     // LLAMA_SPLIT_NONE: the GPU that is used for the entire model
+#     // LLAMA_SPLIT_ROW: the GPU that is used for small tensors and intermediate results
+#     // LLAMA_SPLIT_LAYER: ignored
+#     int32_t main_gpu;
+
+#     // proportion of the model (layers or rows) to offload to each GPU, size: LLAMA_MAX_DEVICES
+#     const float * tensor_split;
 
 #     // Called with a progress value between 0.0 and 1.0. Pass NULL to disable.
 #     // If the provided progress_callback returns true, model loading continues.
 #     // If it returns false, model loading is immediately aborted.
 #     llama_progress_callback progress_callback;
+
 #     // context pointer passed to the progress callback
 #     void * progress_callback_user_data;
 
@@ -384,8 +413,9 @@ class llama_model_params(Structure):
 
     Attributes:
         n_gpu_layers (int): number of layers to store in VRAM
-        main_gpu (int): the GPU that is used for scratch and small tensors
-        tensor_split (ctypes.Array[ctypes.c_float]): how to split layers across multiple GPUs (size: LLAMA_MAX_DEVICES)
+        split_mode (int): how to split the model across multiple GPUs
+        main_gpu (int): the GPU that is used for the entire model. main_gpu interpretation depends on split_mode: LLAMA_SPLIT_NONE: the GPU that is used for the entire model LLAMA_SPLIT_ROW: the GPU that is used for small tensors and intermediate results LLAMA_SPLIT_LAYER: ignored
+        tensor_split (ctypes.Array[ctypes.c_float]): proportion of the model (layers or rows) to offload to each GPU, size: LLAMA_MAX_DEVICES
         progress_callback (llama_progress_callback): called with a progress value between 0.0 and 1.0. Pass NULL to disable. If the provided progress_callback returns true, model loading continues. If it returns false, model loading is immediately aborted.
         progress_callback_user_data (ctypes.c_void_p): context pointer passed to the progress callback
         kv_overrides (ctypes.Array[llama_model_kv_override]): override key-value pairs of the model meta data
@@ -395,6 +425,7 @@ class llama_model_params(Structure):
 
     _fields_ = [
         ("n_gpu_layers", c_int32),
+        ("split_mode", c_int),
         ("main_gpu", c_int32),
         ("tensor_split", c_float_p),
         ("progress_callback", llama_progress_callback),
@@ -423,6 +454,9 @@ class llama_model_params(Structure):
 #     float    yarn_beta_slow;   // YaRN high correction dim
 #     uint32_t yarn_orig_ctx;    // YaRN original context size
 
+#     ggml_backend_sched_eval_callback cb_eval;
+#     void * cb_eval_user_data;
+
 #     enum ggml_type type_k; // data type for K cache
 #     enum ggml_type type_v; // data type for V cache
 
@@ -450,6 +484,8 @@ class llama_context_params(Structure):
         yarn_beta_fast (float): YaRN low correction dim
         yarn_beta_slow (float): YaRN high correction dim
         yarn_orig_ctx (int): YaRN original context size
+        cb_eval (ggml_backend_sched_eval_callback): callback for scheduling eval
+        cb_eval_user_data (ctypes.c_void_p): user data for cb_eval
         type_k (int): data type for K cache
         type_v (int): data type for V cache
         mul_mat_q (bool): if true, use experimental mul_mat_q kernels (DEPRECATED - always true)
@@ -472,6 +508,8 @@ class llama_context_params(Structure):
         ("yarn_beta_fast", c_float),
         ("yarn_beta_slow", c_float),
         ("yarn_orig_ctx", c_uint32),
+        ("cb_eval", ggml_backend_sched_eval_callback),
+        ("cb_eval_user_data", c_void_p),
         ("type_k", c_int),
         ("type_v", c_int),
         ("mul_mat_q", c_bool),
@@ -503,6 +541,7 @@ It might not exist for progress report where '.' is output repeatedly."""
 #     bool quantize_output_tensor; // quantize output.weight
 #     bool only_copy;              // only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
 #     bool pure;                   // disable k-quant mixtures and quantize all tensors to the same type
+#     void * imatrix;              // pointer to importance matrix data
 # } llama_model_quantize_params;
 class llama_model_quantize_params(Structure):
     """Parameters for llama_model_quantize
@@ -514,6 +553,7 @@ class llama_model_quantize_params(Structure):
         quantize_output_tensor (bool): quantize output.weight
         only_copy (bool): only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
         pure (bool): disable k-quant mixtures and quantize all tensors to the same type
+        imatrix (ctypes.c_void_p): pointer to importance matrix data
     """
 
     _fields_ = [
@@ -522,6 +562,8 @@ class llama_model_quantize_params(Structure):
         ("allow_requantize", c_bool),
         ("quantize_output_tensor", c_bool),
         ("only_copy", c_bool),
+        ("pure", c_bool),
+        ("imatrix", c_void_p),
     ]
 
 
@@ -1933,14 +1975,39 @@ _lib.llama_sample_repetition_penalties.restype = None
 
 
 # /// @details Apply classifier-free guidance to the logits as described in academic paper "Stay on topic with Classifier-Free Guidance" https://arxiv.org/abs/2306.17806
-# /// @param candidates A vector of `llama_token_data` containing the candidate tokens, the logits must be directly extracted from the original generation context without being sorted.
-# /// @params guidance_ctx A separate context from the same model. Other than a negative prompt at the beginning, it should have all generated and user input tokens copied from the main context.
-# /// @params scale Guidance strength. 1.0f means no guidance. Higher values mean stronger guidance.
-# LLAMA_API void llama_sample_classifier_free_guidance(
-#             struct llama_context * ctx,
+# /// @param logits Logits extracted from the original generation context.
+# /// @param logits_guidance Logits extracted from a separate context from the same model. Other than a negative prompt at the beginning, it should have all generated and user input tokens copied from the main context.
+# /// @param scale Guidance strength. 1.0f means no guidance. Higher values mean stronger guidance.
+# LLAMA_API void llama_sample_apply_guidance(
+#           struct llama_context * ctx,
+#                          float * logits,
+#                          float * logits_guidance,
+#                          float   scale);
+def llama_sample_apply_guidance(
+    ctx: llama_context_p,
+    logits,  # type: _Pointer[c_float]
+    logits_guidance,  # type: _Pointer[c_float]
+    scale: Union[c_float, float],
+):
+    """Apply classifier-free guidance to the logits as described in academic paper "Stay on topic with Classifier-Free Guidance" https://arxiv.org/abs/2306.17806"""
+    return _lib.llama_sample_apply_guidance(ctx, logits, logits_guidance, scale)
+
+
+_lib.llama_sample_apply_guidance.argtypes = [
+    llama_context_p,
+    c_float_p,
+    c_float_p,
+    c_float,
+]
+_lib.llama_sample_apply_guidance.restype = None
+
+
+# LLAMA_API DEPRECATED(void llama_sample_classifier_free_guidance(
+#           struct llama_context * ctx,
 #         llama_token_data_array * candidates,
-#             struct llama_context * guidance_ctx,
-#                             float   scale);
+#           struct llama_context * guidance_ctx,
+#                          float   scale),
+#           "use llama_sample_apply_guidance() instead");
 def llama_sample_classifier_free_guidance(
     ctx: llama_context_p,
     candidates,  # type: _Pointer[llama_token_data_array]
